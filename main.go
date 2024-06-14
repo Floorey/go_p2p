@@ -8,9 +8,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"net"
-	"os"
+	"strconv"
+	"strings"
 	"sync"
-	"time"
 
 	_ "github.com/mattn/go-sqlite3"
 )
@@ -39,14 +39,7 @@ func main() {
 
 	go startServer()
 
-	go func() {
-		for {
-			time.Sleep(10 * time.Second) // Adjust the interval as needed
-			captureAndPrintMessages()
-		}
-	}()
-
-	sendUserMessage()
+	select {} // Keep the server running
 }
 
 func createTable() {
@@ -96,28 +89,21 @@ func handleConnection(conn net.Conn) {
 			fmt.Println("Error reading message:", err)
 			return
 		}
-		fmt.Println("Message received:", message)
-		err = createAndStoreBlock(message)
-		if err != nil {
-			fmt.Println("Error storing block:", err)
-		}
-		err = sendMessageToAllPeers(message)
-		if err != nil {
-			fmt.Println("Error forwarding message to peers:", err)
-		}
-	}
-}
-
-func sendUserMessage() {
-	reader := bufio.NewReader(os.Stdin)
-
-	for {
-		fmt.Print("Enter a message: ")
-		message, _ := reader.ReadString('\n')
-
-		err := createAndStoreBlock(message)
-		if err != nil {
-			fmt.Println("Error sending message:", err)
+		message = strings.TrimSpace(message)
+		if strings.HasPrefix(message, "retrieve:") {
+			indexStr := strings.TrimPrefix(message, "retrieve:")
+			index, err := strconv.Atoi(indexStr)
+			if err != nil {
+				fmt.Println("Invalid index")
+				return
+			}
+			retrieveAndSendBlock(conn, index)
+		} else {
+			fmt.Println("Message received:", message)
+			err = createAndStoreBlock(message)
+			if err != nil {
+				fmt.Println("Error storing block:", err)
+			}
 		}
 	}
 }
@@ -164,25 +150,30 @@ func sendMessageToAllPeers(message string) error {
 	return nil
 }
 
-func captureAndPrintMessages() {
-	mutex.Lock()
-	defer mutex.Unlock()
+func retrieveAndSendBlock(conn net.Conn, index int) {
+	query := `SELECT hash, message FROM blocks WHERE id = ?`
+	row := db.QueryRow(query, index)
 
-	fmt.Println("Captured Messages from Blockchain:")
-	rows, err := db.Query("SELECT hash, message FROM blocks")
+	var hash, message string
+	err := row.Scan(&hash, &message)
 	if err != nil {
-		fmt.Println("Error querying database:", err)
+		if err == sql.ErrNoRows {
+			conn.Write([]byte("Block not found\n"))
+		} else {
+			conn.Write([]byte("Error retrieving block\n"))
+		}
 		return
 	}
-	defer rows.Close()
 
-	for rows.Next() {
-		var hash, message string
-		err := rows.Scan(&hash, &message)
-		if err != nil {
-			fmt.Println("Error scanning row:", err)
-			continue
-		}
-		fmt.Printf("Hash: %s, Message: %s\n", hash, message)
+	block := Block{
+		Hash:    hash,
+		Message: message,
 	}
+	blockData, err := json.Marshal(block)
+	if err != nil {
+		conn.Write([]byte("Error marshalling block data\n"))
+		return
+	}
+
+	conn.Write([]byte(string(blockData) + "\n"))
 }
